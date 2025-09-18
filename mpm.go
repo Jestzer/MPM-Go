@@ -44,7 +44,7 @@ func main() {
 	args := os.Args[1:]
 	for _, arg := range args {
 		if arg == "-version" {
-			fmt.Println("Version number: 1.5")
+			fmt.Println("Version number: 1.6")
 			os.Exit(0)
 		}
 	}
@@ -305,16 +305,16 @@ func main() {
 	// Ask the user which release they'd like to install.
 	if platform == "macOSARM" {
 		validReleases = []string{
-			"R2023b", "R2024a", "R2024b", "R2025a",
+			"R2023b", "R2024a", "R2024b", "R2025a", "R2025b",
 		}
 	} else {
 		validReleases = []string{
 			"R2017b", "R2018a", "R2018b", "R2019a", "R2019b", "R2020a", "R2020b",
-			"R2021a", "R2021b", "R2022a", "R2022b", "R2023a", "R2023b", "R2024a", "R2024b", "R2025a",
+			"R2021a", "R2021b", "R2022a", "R2022b", "R2023a", "R2023b", "R2024a", "R2024b", "R2025a", "R2025b",
 		}
 	}
 
-	defaultRelease := "R2025a"
+	defaultRelease := "R2025b"
 
 	for {
 		fmt.Printf("Enter which release you would like to install. Press Enter to select %s: ", defaultRelease)
@@ -350,9 +350,9 @@ func main() {
 		}
 
 		if platform == "macOSARM" {
-			fmt.Println(redText("Invalid release. Enter a release between R2023b-R2025a."))
+			fmt.Println(redText("Invalid release. Enter a release between R2023b-R2025b."))
 		} else {
-			fmt.Println(redText("Invalid release. Enter a release between R2017b-R2025a."))
+			fmt.Println(redText("Invalid release. Enter a release between R2017b-R2025b."))
 		}
 	}
 
@@ -377,7 +377,7 @@ func main() {
 		// This is to ensure the products you're specifying exist or that a full list is assembled if you decide to install everything.
 		// Notes:
 		// - No oldProductsToAdd is needed for macOSARM at the moment.
-		// - No new products were added in R2024a, R2024b, nor R2025a for any platform, so they are ommitted entries.
+		// - No new products were added in R2024a, R2024b, R2025a, nor R2025b for any platform, so they are ommitted entries.
 
 		// Let's start with defining the "new" products to add.
 		switch platform {
