@@ -551,15 +551,16 @@ func (s *mpmSession) selectProducts() error {
 		}
 
 		// Determine the products we'll actually be using with MPM.
-		if productsInput == "" {
+		switch productsInput {
+		case "":
 			s.products = allProducts
-		} else if productsInput == "parallel_products" {
+		case "parallel_products":
 			if selectedIdx <= releaseIndex("R2018b") {
 				s.products = []string{"MATLAB", "Parallel_Computing_Toolbox", "MATLAB_Distributed_Computing_Server"}
 			} else {
 				s.products = []string{"MATLAB", "Parallel_Computing_Toolbox", "MATLAB_Parallel_Server"}
 			}
-		} else {
+		default:
 			s.products = strings.Fields(productsInput)
 			missingProducts := checkProductsExist(s.products, allProducts)
 			if len(missingProducts) > 0 {
