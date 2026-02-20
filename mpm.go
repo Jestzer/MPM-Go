@@ -21,41 +21,46 @@ type customWriter struct {
 	writer io.Writer
 }
 
-func main() {
+// mpmSession holds all state accumulated during the interactive CLI session.
+type mpmSession struct {
+	rl        *readline.Instance
+	redText   func(a ...any) string
+	greenText func(a ...any) string
 
-	var (
-		defaultTMP              string
-		installPath             string
-		mpmDownloadPath         string
-		mpmURL                  string
-		products                []string
-		release                 string
-		validReleases           []string
-		defaultInstallationPath string
-		licenseFileUsed         bool
-		licensePath             string
-		mpmFullPath             string
-		newProductsToAdd        map[string]string
-		oldProductsToAdd        map[string]string
-		allProducts             []string
-	)
+	platform        string // "windows", "linux", "macOSx64", "macOSARM"
+	defaultTMP      string
+	mpmURL          string
+	mpmDownloadPath string
+	mpmFullPath     string
 
-	// Print version number, if requested.
-	args := os.Args[1:]
-	for _, arg := range args {
-		if arg == "-version" {
-			fmt.Println("Version number: 1.6")
-			os.Exit(0)
-		}
+	release       string
+	validReleases []string
+	products      []string
+
+	installPath string
+	licensePath string
+	licenseUsed bool
+}
+
+// allReleaseOrder defines the chronological order of all supported releases.
+var allReleaseOrder = []string{
+	"R2017b", "R2018a", "R2018b", "R2019a", "R2019b", "R2020a", "R2020b",
+	"R2021a", "R2021b", "R2022a", "R2022b", "R2023a", "R2023b", "R2024a", "R2024b", "R2025a", "R2025b",
+}
+
+var releaseIndexMap = func() map[string]int {
+	m := make(map[string]int, len(allReleaseOrder))
+	for i, r := range allReleaseOrder {
+		m[r] = i
 	}
+	return m
+}()
 
-	var mpmDownloadNeeded bool = true
-	var mpmTypeIsMismatched bool = false
-	platform := runtime.GOOS
-	redText := color.New(color.FgRed).SprintFunc()
-	greenText := color.New(color.FgHiGreen).SprintFunc()
+func releaseIndex(r string) int {
+	return releaseIndexMap[r]
+}
 
-	// Reader to make using the command line not suck.
+func newSession() (*mpmSession, error) {
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt: "> ",
 		AutoComplete: readline.NewPrefixCompleter(
@@ -63,48 +68,88 @@ func main() {
 		),
 	})
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	defer rl.Close()
 
-	// Setup for better Ctrl+C messaging. This is a channel to receive OS signals.
+	s := &mpmSession{
+		rl:        rl,
+		redText:   color.New(color.FgRed).SprintFunc(),
+		greenText: color.New(color.FgHiGreen).SprintFunc(),
+	}
+
+	// Setup for better Ctrl+C messaging.
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, os.Interrupt, syscall.SIGTERM)
-
-	// Start a goroutine to listen for signals.
 	go func() {
-
-		// Wait for the signal.
 		<-signalChan
-
-		// Handle the signal (in this case, simply exit the program.)
-		fmt.Println(redText("\nExiting from user input."))
+		fmt.Println(s.redText("\nExiting from user input."))
 		os.Exit(0)
 	}()
 
-	// Figure out your OS.
-	switch platform {
+	return s, nil
+}
+
+func main() {
+	// Print version number, if requested.
+	args := os.Args[1:]
+	for _, arg := range args {
+		if arg == "-version" {
+			fmt.Println("Version number: 2.0")
+			os.Exit(0)
+		}
+	}
+
+	s, err := newSession()
+	if err != nil {
+		panic(err)
+	}
+	defer s.rl.Close()
+
+	steps := []func() error{
+		s.detectPlatform,
+		s.selectAndDownloadMPM,
+		s.selectRelease,
+		s.selectProducts,
+		s.selectInstallPath,
+		s.selectLicenseFile,
+		s.runMPM,
+		s.installLicenseFile,
+	}
+	for _, step := range steps {
+		if err := step(); err != nil {
+			fmt.Println(s.redText(err.Error()))
+			os.Exit(1)
+		}
+	}
+
+	fmt.Println(s.greenText("Installation finished! Press the Enter/Return key to close this program."))
+	ExitHelper(s.rl)
+}
+
+// Figure out your OS.
+func (s *mpmSession) detectPlatform() error {
+	switch runtime.GOOS {
 	case "darwin":
-		defaultTMP = "/tmp"
+		s.defaultTMP = "/tmp"
 		switch runtime.GOARCH {
 		case "amd64":
-			platform = "macOSx64"
-			mpmURL = "https://www.mathworks.com/mpm/maci64/mpm"
+			s.platform = "macOSx64"
+			s.mpmURL = "https://www.mathworks.com/mpm/maci64/mpm"
 		case "arm64":
-			platform = "macOSARM"
+			s.platform = "macOSARM"
 
 			// Ask macOSARM users which installer they'd like to use.
 			for {
 				fmt.Println("Would you like to install an Intel or ARM version of your products? Type in \"intel\", \"arm\" or \"idk\" if you're unsure.")
-				manualOSspecified, err := readUserInput(rl)
+				manualOSspecified, err := readUserInput(s.rl)
 				if err != nil {
 					if err.Error() == "Interrupt" {
-						fmt.Println(redText("Exiting from user input."))
+						fmt.Println(s.redText("Exiting from user input."))
 					} else {
-						fmt.Println(redText("Error reading line: ", err))
+						fmt.Println(s.redText("Error reading line: ", err))
 						continue
 					}
-					return
+					return err
 				}
 
 				manualOSspecified = strings.ToLower(strings.TrimSpace(manualOSspecified))
@@ -112,125 +157,133 @@ func main() {
 				// Haha yes, I will make you use Intel if you literally type in "idk".
 				switch manualOSspecified {
 				case "intel", "\"intel\"", "idk", "\"idk\"":
-					mpmURL = "https://www.mathworks.com/mpm/maci64/mpm"
-					platform = "macOSx64"
+					s.mpmURL = "https://www.mathworks.com/mpm/maci64/mpm"
+					s.platform = "macOSx64"
 				case "arm", "\"arm\"":
-					mpmURL = "https://www.mathworks.com/mpm/maca64/mpm"
-					platform = "macOSARM"
+					s.mpmURL = "https://www.mathworks.com/mpm/maca64/mpm"
+					s.platform = "macOSARM"
 				default:
-					fmt.Println(redText("Invalid selection. Enter either intel, arm, or idk."))
+					fmt.Println(s.redText("Invalid selection. Enter either intel, arm, or idk."))
 					continue
 				}
 				break
 			}
 		}
 	case "windows":
-		defaultTMP = os.Getenv("TMP")
-		mpmURL = "https://www.mathworks.com/mpm/win64/mpm"
+		s.platform = "windows"
+		s.defaultTMP = os.Getenv("TMP")
+		s.mpmURL = "https://www.mathworks.com/mpm/win64/mpm"
 
 		admin, err := hasAdminRights()
 		if err != nil {
-			fmt.Println(redText("Error checking for administrator rights. This program must be run as an administrator.", err))
+			fmt.Println(s.redText("Error checking for administrator rights. This program must be run as an administrator.", err))
 			os.Exit(1)
 		}
 		if !admin {
-			fmt.Println(redText("Error: This program must be run as an administrator."))
+			fmt.Println(s.redText("Error: This program must be run as an administrator."))
 			os.Exit(1)
 		}
 
 	case "linux":
-		defaultTMP = "/tmp"
-		mpmURL = "https://www.mathworks.com/mpm/glnxa64/mpm"
+		s.platform = "linux"
+		s.defaultTMP = "/tmp"
+		s.mpmURL = "https://www.mathworks.com/mpm/glnxa64/mpm"
 	default:
-		defaultTMP = "unknown"
-		fmt.Println(redText("Your operating system is unrecognized. Press Enter/Return on your keyboard to close this program."))
-		ExitHelper()
+		fmt.Println(s.redText("Your operating system is unrecognized. Press Enter/Return on your keyboard to close this program."))
+		ExitHelper(s.rl)
 	}
+	return nil
+}
 
-	// Figure out where you want actual MPM to go.
+// Figure out where you want actual MPM to go and download it.
+func (s *mpmSession) selectAndDownloadMPM() error {
+	mpmDownloadNeeded := true
+	mpmTypeIsMismatched := false
+
 	for {
 		fmt.Print("Enter the path to where you would like MPM to download to. " +
-			"Press Enter to use \"" + defaultTMP + "\"\n> ")
-		mpmDownloadPath, err = readUserInput(rl)
+			"Press Enter to use \"" + s.defaultTMP + "\"\n> ")
+		mpmDownloadPath, err := readUserInput(s.rl)
 		if err != nil {
 			if err.Error() == "Interrupt" {
-				fmt.Println(redText("Exiting from user input."))
+				fmt.Println(s.redText("Exiting from user input."))
 			} else {
-				fmt.Println(redText("Error reading line: ", err))
+				fmt.Println(s.redText("Error reading line: ", err))
 				continue
 			}
-			return
+			return err
 		}
 		mpmDownloadPath = strings.TrimSpace(mpmDownloadPath)
 
 		if mpmDownloadPath == "" {
-			mpmDownloadPath = defaultTMP
+			mpmDownloadPath = s.defaultTMP
 		} else {
 			_, err := os.Stat(mpmDownloadPath)
 			if os.IsNotExist(err) {
 				fmt.Printf("The directory \"%s\" does not exist. Do you want to create it? (y/n)\n> ", mpmDownloadPath)
-				createDir, err := readUserInput(rl)
+				createDir, err := readUserInput(s.rl)
 				if err != nil {
 					if err.Error() == "Interrupt" {
-						fmt.Println(redText("Exiting from user input."))
+						fmt.Println(s.redText("Exiting from user input."))
 					} else {
-						fmt.Println(redText("Error reading line: ", err))
+						fmt.Println(s.redText("Error reading line: ", err))
 						continue
 					}
-					return
+					return err
 				}
 
-				createDir = strings.TrimSpace(createDir)
-				createDir = strings.ToLower(createDir)
+				createDir = strings.ToLower(strings.TrimSpace(createDir))
 
 				if createDir == "y" || createDir == "yes" || createDir == "t" || createDir == "true" {
 					err := os.MkdirAll(mpmDownloadPath, 0755)
 					if err != nil {
-						fmt.Println(redText("Failed to create the directory: ", err, "Please select a different directory."))
+						fmt.Println(s.redText("Failed to create the directory: ", err, "Please select a different directory."))
 						continue
 					}
 					fmt.Println("Directory created successfully.")
 				} else {
-					fmt.Println(redText("Directory creation skipped. Please select a different directory."))
+					fmt.Println(s.redText("Directory creation skipped. Please select a different directory."))
 					continue
 				}
 			} else if err != nil {
-				fmt.Println(redText("Error checking the directory: ", err, "Please select a different directory."))
+				fmt.Println(s.redText("Error checking the directory: ", err, "Please select a different directory."))
 				continue
 			}
 		}
 
+		s.mpmDownloadPath = mpmDownloadPath
+
 		// Check if MPM already exists in the selected directory.
 		fileName := filepath.Join(mpmDownloadPath, "mpm")
-		if platform == "windows" {
+		if s.platform == "windows" {
 			fileName = filepath.Join(mpmDownloadPath, "mpm.exe")
 		}
-		_, err := os.Stat(fileName)
+		_, err = os.Stat(fileName)
 		for {
 			if err == nil {
-				if platform == "macOSARM" || platform == "macOSx64" {
-					fmt.Print("An existing copy of MPM has been detected. Checking which version you downloaded, please wait.\n\n") // Want extra space and suppress Go warnings.
+				if s.platform == "macOSARM" || s.platform == "macOSx64" {
+					fmt.Print("An existing copy of MPM has been detected. Checking which version you downloaded, please wait.\n\n")
 					cmd := exec.Command("lipo", "-info", fileName)
 					output, err := cmd.Output()
 					if err != nil {
-						fmt.Println(redText("Error checking MPM's file architecture: ", err, ". Please move or delete your existing copy of MPM from the selected directory before proceeding. "+
-							"You likely either have a corrputed copy of MPM or it is for Windows or Linux. Press Enter/Return on your keyboard to close this program."))
-						ExitHelper()
+						fmt.Println(s.redText("Error checking MPM's file architecture: ", err, ". Please move or delete your existing copy of MPM from the selected directory before proceeding. "+
+							"You likely either have a corrupted copy of MPM or it is for Windows or Linux. Press Enter/Return on your keyboard to close this program."))
+						ExitHelper(s.rl)
 					}
 					archInfo := string(output)
 
 					// Warn users if their copy of MPM doesn't match their selected CPU type.
 					if strings.Contains(archInfo, "arm64") {
-						if platform == "macOSx64" {
+						if s.platform == "macOSx64" {
 							mpmTypeIsMismatched = true
 						}
 					} else if strings.Contains(archInfo, "x86_64") {
-						if platform == "macOSARM" {
+						if s.platform == "macOSARM" {
 							mpmTypeIsMismatched = true
 						}
 					} else {
-						fmt.Println(redText("Error checking MPM's file architecture. Please move or delete your existing copy of MPM from the selected directory before proceeding. Press Enter/Return on your keyboard to close this program."))
-						ExitHelper()
+						fmt.Println(s.redText("Error checking MPM's file architecture. Please move or delete your existing copy of MPM from the selected directory before proceeding. Press Enter/Return on your keyboard to close this program."))
+						ExitHelper(s.rl)
 					}
 				}
 				if mpmTypeIsMismatched {
@@ -238,24 +291,24 @@ func main() {
 				} else {
 					fmt.Println("MPM already exists in this directory. Would you like to overwrite it?")
 				}
-				overwriteMPM, err := readUserInput(rl)
+				overwriteMPM, err := readUserInput(s.rl)
 				if err != nil {
 					if err.Error() == "Interrupt" {
-						fmt.Println(redText("Exiting from user input."))
+						fmt.Println(s.redText("Exiting from user input."))
 					} else {
-						fmt.Println(redText("Error reading line: ", err))
+						fmt.Println(s.redText("Error reading line: ", err))
 						continue
 					}
-					return
+					return err
 				}
 
 				overwriteMPM = strings.TrimSpace(strings.ToLower(overwriteMPM))
 
 				if overwriteMPM == "n" || overwriteMPM == "no" || overwriteMPM == "f" || overwriteMPM == "false" {
 					if mpmTypeIsMismatched { // Make up your mind. Do you want to use ARM or Intel?
-						fmt.Println(redText("You can't use a version of MPM that doesn't match the CPU architecture you selected. Please either select a different directory to download " +
+						fmt.Println(s.redText("You can't use a version of MPM that doesn't match the CPU architecture you selected. Please either select a different directory to download " +
 							"MPM or move your existing copy elsewhere. Press Enter/Return on your keyboard to close this program."))
-						ExitHelper()
+						ExitHelper(s.rl)
 					} else {
 						fmt.Println("Skipping download.")
 						mpmDownloadNeeded = false
@@ -266,7 +319,7 @@ func main() {
 				if overwriteMPM == "y" || overwriteMPM == "yes" || overwriteMPM == "t" || overwriteMPM == "true" {
 					break
 				} else {
-					fmt.Println(redText("Invalid choice. Please enter either 'y' or 'n'."))
+					fmt.Println(s.redText("Invalid choice. Please enter either 'y' or 'n'."))
 					continue
 				}
 			}
@@ -276,20 +329,17 @@ func main() {
 		// Download MPM.
 		if mpmDownloadNeeded {
 			fmt.Println("Downloading MPM. Please wait.")
-			err = downloadFile(mpmURL, fileName)
+			err = downloadFile(s.mpmURL, fileName)
 			if err != nil {
-				fmt.Println(redText("Failed to download MPM. ", err))
+				fmt.Println(s.redText("Failed to download MPM. ", err))
 				os.Exit(1)
 			}
 			fmt.Println("MPM downloaded successfully.")
 		}
 
 		// Make sure you can actually execute MPM on Linux and macOS.
-		if platform != "windows" {
-			command := "chmod +x " + mpmDownloadPath + "/mpm"
-
-			// Execute the command
-			cmd := exec.Command("bash", "-c", command)
+		if s.platform != "windows" {
+			cmd := exec.Command("chmod", "+x", filepath.Join(mpmDownloadPath, "mpm"))
 			err := cmd.Run()
 
 			if err != nil {
@@ -301,14 +351,17 @@ func main() {
 		}
 		break
 	}
+	return nil
+}
 
-	// Ask the user which release they'd like to install.
-	if platform == "macOSARM" {
-		validReleases = []string{
+// Ask the user which release they'd like to install.
+func (s *mpmSession) selectRelease() error {
+	if s.platform == "macOSARM" {
+		s.validReleases = []string{
 			"R2023b", "R2024a", "R2024b", "R2025a", "R2025b",
 		}
 	} else {
-		validReleases = []string{
+		s.validReleases = []string{
 			"R2017b", "R2018a", "R2018b", "R2019a", "R2019b", "R2020a", "R2020b",
 			"R2021a", "R2021b", "R2022a", "R2022b", "R2023a", "R2023b", "R2024a", "R2024b", "R2025a", "R2025b",
 		}
@@ -319,15 +372,15 @@ func main() {
 	for {
 		fmt.Printf("Enter which release you would like to install. Press Enter to select %s: ", defaultRelease)
 		fmt.Print("\n> ")
-		release, err = readUserInput(rl)
+		release, err := readUserInput(s.rl)
 		if err != nil {
 			if err.Error() == "Interrupt" {
-				fmt.Println(redText("Exiting from user input."))
+				fmt.Println(s.redText("Exiting from user input."))
 			} else {
-				fmt.Println(redText("Error reading line: ", err))
+				fmt.Println(s.redText("Error reading line: ", err))
 				continue
 			}
-			return
+			return err
 		}
 
 		release = strings.TrimSpace(release)
@@ -337,7 +390,7 @@ func main() {
 
 		release = strings.ToLower(release)
 		found := false
-		for _, validRelease := range validReleases {
+		for _, validRelease := range s.validReleases {
 			if strings.ToLower(validRelease) == release {
 				release = validRelease
 				found = true
@@ -346,29 +399,33 @@ func main() {
 		}
 
 		if found {
+			s.release = release
 			break
 		}
 
-		if platform == "macOSARM" {
-			fmt.Println(redText("Invalid release. Enter a release between R2023b-R2025b."))
+		if s.platform == "macOSARM" {
+			fmt.Println(s.redText("Invalid release. Enter a release between R2023b-R2025b."))
 		} else {
-			fmt.Println(redText("Invalid release. Enter a release between R2017b-R2025b."))
+			fmt.Println(s.redText("Invalid release. Enter a release between R2017b-R2025b."))
 		}
 	}
+	return nil
+}
 
+// Product selection and validation.
+func (s *mpmSession) selectProducts() error {
 	for {
-		// Product selection.
 		fmt.Print("Enter the products you would like to install. Use the same syntax as MPM to specify products. " +
 			"Press Enter to install all products.\n> ")
-		productsInput, err := readUserInput(rl)
+		productsInput, err := readUserInput(s.rl)
 		if err != nil {
 			if err.Error() == "Interrupt" {
-				fmt.Println(redText("Exiting from user input."))
+				fmt.Println(s.redText("Exiting from user input."))
 			} else {
-				fmt.Println(redText("Error reading line: ", err))
+				fmt.Println(s.redText("Error reading line: ", err))
 				continue
 			}
-			return
+			return err
 		}
 
 		productsInput = strings.TrimSpace(productsInput)
@@ -376,11 +433,14 @@ func main() {
 		// Begin assembling the full product list based on your release and platform.
 		// This is to ensure the products you're specifying exist or that a full list is assembled if you decide to install everything.
 		// Notes:
-		// - No oldProductsToAdd is needed for macOSARM at the moment.
-		// - No new products were added in R2024a, R2024b, R2025a, nor R2025b for any platform, so they are ommitted entries.
+		// - No oldProductsToAdd is needed for macOSARM at the moment (apart from R2024b).
+		// - No new products were added in R2024a, R2024b, R2025a, nor R2025b for any platform, so they are omitted entries.
+		var newProductsToAdd map[string]string
+		var oldProductsToAdd map[string]string
+		var allProducts []string
 
 		// Let's start with defining the "new" products to add.
-		switch platform {
+		switch s.platform {
 		case "windows":
 			newProductsToAdd = map[string]string{
 				"R2023b": "Simulink_Fault_Analyzer Polyspace_Test",
@@ -439,14 +499,15 @@ func main() {
 		}
 
 		// Use a loop to go through the list above to add the appropriate products.
+		selectedIdx := releaseIndex(s.release)
 		for releaseLoop, product := range newProductsToAdd {
-			if release >= releaseLoop {
+			if selectedIdx >= releaseIndex(releaseLoop) {
 				allProducts = append(allProducts, strings.Fields(product)...)
 			}
 		}
 
 		// Old products to add.
-		switch platform {
+		switch s.platform {
 		case "windows":
 			oldProductsToAdd = map[string]string{
 				"R2024b": "Filter_Design_HDL_Coder",
@@ -484,57 +545,63 @@ func main() {
 
 		// The actual for loop that goes through the list above. Note that it uses the same logic as newProducts, it just uses <= instead of >=.
 		for releaseLoop, product := range oldProductsToAdd {
-			if release <= releaseLoop {
+			if selectedIdx <= releaseIndex(releaseLoop) {
 				allProducts = append(allProducts, strings.Fields(product)...)
 			}
 		}
 
 		// Determine the products we'll actually be using with MPM.
 		if productsInput == "" {
-			products = allProducts
-		} else if productsInput == "parallel_products" && release != "R2018b" && release != "R2018a" && release != "R2017b" {
-			products = []string{"MATLAB", "Parallel_Computing_Toolbox", "MATLAB_Parallel_Server"}
-		} else if productsInput == "parallel_products" && release == "R2018b" || release == "R2018a" || release == "R2017b" {
-			products = []string{"MATLAB", "Parallel_Computing_Toolbox", "MATLAB_Parallel_Server"}
+			s.products = allProducts
+		} else if productsInput == "parallel_products" {
+			if selectedIdx <= releaseIndex("R2018b") {
+				s.products = []string{"MATLAB", "Parallel_Computing_Toolbox", "MATLAB_Distributed_Computing_Server"}
+			} else {
+				s.products = []string{"MATLAB", "Parallel_Computing_Toolbox", "MATLAB_Parallel_Server"}
+			}
 		} else {
-			products = strings.Fields(productsInput)
-			missingProducts := checkProductsExist(products, allProducts)
+			s.products = strings.Fields(productsInput)
+			missingProducts := checkProductsExist(s.products, allProducts)
 			if len(missingProducts) > 0 {
-				fmt.Println(redText("The following products do not exist:"))
+				fmt.Println(s.redText("The following products do not exist:"))
 				for _, missingProduct := range missingProducts {
-					fmt.Println(redText("- " + missingProduct))
+					fmt.Println(s.redText("- " + missingProduct))
 				}
-				fmt.Println(redText("Please try again and check for any typos. Different products should be separated by spaces. Spaces in a product name should be replaced with underscores."))
+				fmt.Println(s.redText("Please try again and check for any typos. Different products should be separated by spaces. Spaces in a product name should be replaced with underscores."))
 				continue
 			}
 		}
 		break
 	}
+	return nil
+}
 
+// Select the installation path.
+func (s *mpmSession) selectInstallPath() error {
 	// Set the default installation path based on your OS.
-	if platform == "macOSx64" || platform == "macOSARM" {
-		defaultInstallationPath = "/Applications/MATLAB_" + release + ".app"
-	}
-	if platform == "windows" {
-		defaultInstallationPath = "C:\\Program Files\\MATLAB\\" + release
-	}
-	if platform == "linux" {
-		defaultInstallationPath = "/usr/local/MATLAB/" + release
+	var defaultInstallationPath string
+	switch {
+	case s.platform == "macOSx64" || s.platform == "macOSARM":
+		defaultInstallationPath = "/Applications/MATLAB_" + s.release + ".app"
+	case s.platform == "windows":
+		defaultInstallationPath = "C:\\Program Files\\MATLAB\\" + s.release
+	case s.platform == "linux":
+		defaultInstallationPath = "/usr/local/MATLAB/" + s.release
 	}
 
 	for {
 		fmt.Print("Enter the full path where you would like to install these products. "+
 			"Press Enter to install to default path: \"", defaultInstallationPath, "\"\n> ")
 
-		installPath, err = readUserInput(rl)
+		installPath, err := readUserInput(s.rl)
 		if err != nil {
 			if err.Error() == "Interrupt" {
-				fmt.Println(redText("Exiting from user input."))
+				fmt.Println(s.redText("Exiting from user input."))
 			} else {
-				fmt.Println(redText("Error reading line: ", err))
+				fmt.Println(s.redText("Error reading line: ", err))
 				continue
 			}
-			return
+			return err
 		}
 
 		installPath = strings.TrimSpace(installPath)
@@ -543,148 +610,150 @@ func main() {
 			installPath = defaultInstallationPath
 		} else {
 			if _, err := os.Stat(installPath); os.IsNotExist(err) {
-
-				// If the folder does not exist, try to create it.
-				if _, err := os.Stat(installPath); os.IsNotExist(err) {
-					if err := os.MkdirAll(installPath, 0755); err != nil {
-						fmt.Println(redText("Error creating directory: ", err, " Please pick a different installation path."))
+				if err := os.MkdirAll(installPath, 0755); err != nil {
+					fmt.Println(s.redText("Error creating directory: ", err, " Please pick a different installation path."))
+					continue
+				} else {
+					fullPath, err := filepath.Abs(installPath)
+					if err != nil {
+						fmt.Println(s.redText("Error reading newly-created directory's full path: ", err, " Please pick a different installation path."))
 						continue
 					} else {
-						fullPath, err := filepath.Abs(installPath)
-						if err != nil {
-							fmt.Println(redText("Error reading newly-created directory's full path: ", err, " Please pick a different installation path."))
-							continue
-						} else {
-							fmt.Println("Directory successfully created:", fullPath)
-						}
+						fmt.Println("Directory successfully created:", fullPath)
 					}
 				}
 			} else if err != nil {
 				fullPath, _ := filepath.Abs(installPath)
-				fmt.Println(redText("Error selecting directory: ", fullPath, " Please pick a different installation path."))
+				fmt.Println(s.redText("Error selecting directory: ", fullPath, " Please pick a different installation path."))
 				continue
 			}
 		}
+
+		s.installPath = installPath
 		break
 	}
+	return nil
+}
 
-	// Optional license file selection.
+// Optional license file selection.
+func (s *mpmSession) selectLicenseFile() error {
 	for {
 		fmt.Print("If you have a license file you'd like to include in your installation, " +
 			"please provide the full path to the existing license file.\n> ")
 
-		licensePath, err = readUserInput(rl)
+		licensePath, err := readUserInput(s.rl)
 		if err != nil {
 			if err.Error() == "Interrupt" {
-				fmt.Println(redText("Exiting from user input."))
+				fmt.Println(s.redText("Exiting from user input."))
 			} else {
-				fmt.Println(redText("Error reading line: ", err))
+				fmt.Println(s.redText("Error reading line: ", err))
 				continue
 			}
-			return
+			return err
 		}
 		licensePath = strings.TrimSpace(licensePath)
 
 		if licensePath == "" {
-			licenseFileUsed = false
+			s.licenseUsed = false
 			break
 		} else {
-
 			// Check if the license file exists and has the correct extension.
 			_, err := os.Stat(licensePath)
 			if err != nil {
-				fmt.Println(redText("Error: ", err))
+				fmt.Println(s.redText("Error: ", err))
 				continue
 			} else if !strings.HasSuffix(licensePath, ".dat") && !strings.HasSuffix(licensePath, ".lic") && !strings.HasSuffix(licensePath, ".xml") {
-				fmt.Println(redText("Invalid file extension. Please provide a file with a .dat, .lic, or .xml file extension."))
+				fmt.Println(s.redText("Invalid file extension. Please provide a file with a .dat, .lic, or .xml file extension."))
 				continue
 			} else {
-				licenseFileUsed = true
+				s.licenseUsed = true
+				s.licensePath = licensePath
 				break
 			}
 		}
 	}
+	return nil
+}
 
+// Construct the command and run MPM.
+func (s *mpmSession) runMPM() error {
 	fmt.Println("Loading, please wait.")
 
-	if runtime.GOOS == "darwin" {
-		mpmFullPath = mpmDownloadPath + "/mpm"
+	mpmBinary := "mpm"
+	if s.platform == "windows" {
+		mpmBinary = "mpm.exe"
 	}
-	if runtime.GOOS == "windows" {
-		mpmFullPath = mpmDownloadPath + "\\mpm.exe"
-	}
-	if runtime.GOOS == "linux" {
-		mpmFullPath = mpmDownloadPath + "/mpm"
-	}
+	s.mpmFullPath = filepath.Join(s.mpmDownloadPath, mpmBinary)
 
-	// Construct the command and arguments to launch MPM.
 	cmdArgs := []string{
-		mpmFullPath,
+		s.mpmFullPath,
 		"install",
-		"--release=" + release,
-		"--destination=" + installPath,
+		"--release=" + s.release,
+		"--destination=" + s.installPath,
 		"--products",
 	}
-	cmdArgs = append(cmdArgs, products...)
+	cmdArgs = append(cmdArgs, s.products...)
 
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 
 	// Use customWriter to intercept and process MPM's output.
 	cmd.Stdout = &customWriter{writer: os.Stdout}
 	cmd.Stderr = &customWriter{writer: os.Stderr}
-	err = cmd.Run() // Run it already geeeeeeeez.
+	err := cmd.Run() // Run it already geeeeeeeez.
 
 	if err != nil {
 		errString := err.Error()
 		if strings.Contains(errString, "mpm: no such file or directory") || strings.Contains(errString, "mpm.exe: no such file or directory") {
-			fmt.Println(redText("MPM was either moved, renamed, deleted, or you've lost permissions to access it. Press the Enter/Return key to close this program."))
+			fmt.Println(s.redText("MPM was either moved, renamed, deleted, or you've lost permissions to access it. Press the Enter/Return key to close this program."))
 		} else {
-			fmt.Println(redText("An error occurred during installation. See the error above for more information. ", err, ". Press the Enter/Return key to close this program."))
+			fmt.Println(s.redText("An error occurred during installation. See the error above for more information. ", err, ". Press the Enter/Return key to close this program."))
 		}
-		ExitHelper()
+		ExitHelper(s.rl)
 	}
-
-	// Create the licenses directory and the file specified, if you specified one.
-	if licenseFileUsed {
-
-		// Create the licenses directory.
-		licensesInstallationDirectory := filepath.Join(installPath, "licenses")
-		err := os.Mkdir(licensesInstallationDirectory, 0755)
-
-		// The licenses directory may already exist if we're installation toolboxes into an existing installation of a base product, in which case, we'll ignore the error produced.
-		if err != nil {
-			errString := err.Error()
-			if !strings.Contains(errString, "file exists") {
-				fmt.Println(redText("Error creating \"licenses\" directory: ", err, ". You will need to manually place your license file in your installation."))
-			}
-		}
-
-		// Copy the license file to the "licenses" directory.
-		licenseFile := filepath.Base(licensePath)
-		destPath := filepath.Join(licensesInstallationDirectory, licenseFile)
-
-		src, err := os.Open(licensePath)
-		if err != nil {
-			fmt.Println(redText("Error opening license file: ", err, ". You will need to manually place your license file in your installation."))
-		}
-		defer src.Close()
-
-		dest, err := os.Create(destPath)
-		if err != nil {
-			fmt.Println(redText("Error creating destination file: ", err, ". You will need to manually place your license file in your installation."))
-		}
-		defer dest.Close()
-
-		_, err = io.Copy(dest, src)
-		if err != nil {
-			fmt.Println(redText("Error copying license file: ", err, ". You will need to manually place your license file in your installation."))
-		}
-	}
-
-	fmt.Println(greenText("Installation finished! Press the Enter/Return key to close this program."))
-	ExitHelper()
+	return nil
 }
 
+// Create the licenses directory and copy the license file, if one was specified.
+func (s *mpmSession) installLicenseFile() error {
+	if !s.licenseUsed {
+		return nil
+	}
+
+	// Create the licenses directory.
+	licensesDir := filepath.Join(s.installPath, "licenses")
+	if err := os.Mkdir(licensesDir, 0755); err != nil && !os.IsExist(err) {
+		fmt.Println(s.redText("Error creating \"licenses\" directory: ", err, ". You will need to manually place your license file in your installation."))
+		return nil
+	}
+
+	// Copy the license file to the "licenses" directory.
+	destPath := filepath.Join(licensesDir, filepath.Base(s.licensePath))
+
+	src, err := os.Open(s.licensePath)
+	if err != nil {
+		fmt.Println(s.redText("Error opening license file: ", err, ". You will need to manually place your license file in your installation."))
+		return nil
+	}
+	defer src.Close()
+
+	dest, err := os.Create(destPath)
+	if err != nil {
+		fmt.Println(s.redText("Error creating destination file: ", err, ". You will need to manually place your license file in your installation."))
+		return nil
+	}
+	defer dest.Close()
+
+	if _, err = io.Copy(dest, src); err != nil {
+		fmt.Println(s.redText("Error copying license file: ", err, ". You will need to manually place your license file in your installation."))
+	}
+	return nil
+}
+
+// hasAdminRights checks for admin privileges by attempting to create a temp file
+// in the Windows root directory. This is a pragmatic check rather than a proper
+// Windows API call (which would require golang.org/x/sys/windows).
+// Limitation: may produce false negatives if root-dir creation is restricted
+// for reasons other than admin rights (e.g. antivirus or disk policies).
 func hasAdminRights() (bool, error) {
 
 	// Find out where Windows is installed.
@@ -718,6 +787,10 @@ func downloadFile(url string, filePath string) error {
 	}
 	defer response.Body.Close()
 
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("download failed: HTTP %d %s", response.StatusCode, response.Status)
+	}
+
 	file, err := os.Create(filePath)
 	if err != nil {
 		return err
@@ -725,11 +798,7 @@ func downloadFile(url string, filePath string) error {
 	defer file.Close()
 
 	_, err = io.Copy(file, response.Body)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
 // Make sure the products you've specified exist.
@@ -808,29 +877,16 @@ func (cw *customWriter) Write(p []byte) (n int, err error) {
 }
 
 // For the double-clickers.
-func ExitHelper() {
-	redText := color.New(color.FgRed).SprintFunc()
-	for {
-		rl, err := readline.NewEx(&readline.Config{
-			Prompt: "> ",
-			AutoComplete: readline.NewPrefixCompleter(
-				readline.PcItemDynamic(listFiles),
-			),
-		})
-		if err != nil {
-			panic(err)
-		}
-
-		rl.SetPrompt("")
-		_, err = readUserInput(rl)
-		if err != nil {
-			if err.Error() == "Interrupt" {
-				fmt.Println(redText("Exiting from user input."))
-			} else {
-				fmt.Println(redText("Error reading line: ", err))
-				continue
-			}
-		}
+func ExitHelper(rl *readline.Instance) {
+	if rl == nil {
+		fmt.Scanln()
 		os.Exit(0)
 	}
+	rl.SetPrompt("")
+	_, err := rl.Readline()
+	if err != nil {
+		redText := color.New(color.FgRed).SprintFunc()
+		fmt.Println(redText("Exiting from user input."))
+	}
+	os.Exit(0)
 }
