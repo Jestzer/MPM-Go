@@ -94,7 +94,7 @@ func main() {
 	args := os.Args[1:]
 	for _, arg := range args {
 		if arg == "-version" {
-			fmt.Println("Version number: 2.0")
+			fmt.Println("Version number: 2.1")
 			os.Exit(0)
 		}
 	}
@@ -551,26 +551,30 @@ func (s *mpmSession) selectProducts() error {
 		}
 
 		// Determine the products we'll actually be using with MPM.
-		switch productsInput {
-		case "":
+		if productsInput == "" {
 			s.products = allProducts
-		case "parallel_products":
+		} else if strings.EqualFold(productsInput, "parallel_products") {
 			if selectedIdx <= releaseIndex("R2018b") {
 				s.products = []string{"MATLAB", "Parallel_Computing_Toolbox", "MATLAB_Distributed_Computing_Server"}
 			} else {
 				s.products = []string{"MATLAB", "Parallel_Computing_Toolbox", "MATLAB_Parallel_Server"}
 			}
-		default:
-			s.products = strings.Fields(productsInput)
-			missingProducts := checkProductsExist(s.products, allProducts)
-			if len(missingProducts) > 0 {
-				fmt.Println(s.redText("The following products do not exist:"))
-				for _, missingProduct := range missingProducts {
-					fmt.Println(s.redText("- " + missingProduct))
+		} else {
+			inputProducts := strings.Fields(productsInput)
+			resolved, unresolved := resolveProducts(inputProducts, allProducts)
+			if len(unresolved) > 0 {
+				fmt.Println(s.redText("The following products were not recognized:"))
+				for _, u := range unresolved {
+					if u.suggestion != "" {
+						fmt.Printf("  %s  did you mean %s?\n", s.redText("- "+u.input), s.greenText(u.suggestion))
+					} else {
+						fmt.Println(s.redText("- " + u.input))
+					}
 				}
-				fmt.Println(s.redText("Please try again and check for any typos. Different products should be separated by spaces. Spaces in a product name should be replaced with underscores."))
+				fmt.Println(s.redText("Please try again. Different products should be separated by spaces. Spaces in a product name should be replaced with underscores."))
 				continue
 			}
+			s.products = resolved
 		}
 		break
 	}
@@ -802,20 +806,81 @@ func downloadFile(url string, filePath string) error {
 	return err
 }
 
-// Make sure the products you've specified exist.
-func checkProductsExist(inputProducts []string, availableProducts []string) []string {
-	productSet := make(map[string]struct{}, len(availableProducts))
-	for _, product := range availableProducts {
-		productSet[product] = struct{}{}
+type productSuggestion struct {
+	input      string
+	suggestion string
+}
+
+// resolveProducts matches input product names against available products using
+// case-insensitive comparison. Unresolved products include a fuzzy suggestion
+// when a close match exists.
+func resolveProducts(inputProducts, availableProducts []string) (resolved []string, unresolved []productSuggestion) {
+	lowerMap := make(map[string]string, len(availableProducts))
+	for _, p := range availableProducts {
+		lowerMap[strings.ToLower(p)] = p
 	}
 
-	var missingProducts []string
-	for _, inputProduct := range inputProducts {
-		if _, exists := productSet[inputProduct]; !exists {
-			missingProducts = append(missingProducts, inputProduct)
+	for _, input := range inputProducts {
+		if canonical, ok := lowerMap[strings.ToLower(input)]; ok {
+			resolved = append(resolved, canonical)
+			continue
+		}
+
+		suggestion := closestProduct(input, availableProducts)
+		unresolved = append(unresolved, productSuggestion{input: input, suggestion: suggestion})
+	}
+	return
+}
+
+// closestProduct finds the available product with the smallest edit distance
+// to input, returning it only if the distance is reasonable.
+func closestProduct(input string, products []string) string {
+	inputLower := strings.ToLower(input)
+	bestDist := len(input) + 1
+	bestProduct := ""
+	for _, p := range products {
+		dist := levenshtein(inputLower, strings.ToLower(p))
+		if dist < bestDist {
+			bestDist = dist
+			bestProduct = p
 		}
 	}
-	return missingProducts
+
+	maxDist := max(len(input)/3, 3)
+	if bestDist <= maxDist {
+		return bestProduct
+	}
+	return ""
+}
+
+// levenshtein computes the edit distance between two strings.
+func levenshtein(a, b string) int {
+	la, lb := len(a), len(b)
+	if la == 0 {
+		return lb
+	}
+	if lb == 0 {
+		return la
+	}
+
+	prev := make([]int, lb+1)
+	curr := make([]int, lb+1)
+	for j := range prev {
+		prev[j] = j
+	}
+
+	for i := 1; i <= la; i++ {
+		curr[0] = i
+		for j := 1; j <= lb; j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			curr[j] = min(curr[j-1]+1, min(prev[j]+1, prev[j-1]+cost))
+		}
+		prev, curr = curr, prev
+	}
+	return prev[lb]
 }
 
 // Reading user input in a separate function allows me to accept input such as "quit" or "exit" without needing to repeat said code.
