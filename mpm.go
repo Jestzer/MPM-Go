@@ -117,6 +117,9 @@ func main() {
 	}
 	for _, step := range steps {
 		if err := step(); err != nil {
+			if err.Error() == "Interrupt" {
+				os.Exit(0)
+			}
 			fmt.Println(s.redText(err.Error()))
 			os.Exit(1)
 		}
