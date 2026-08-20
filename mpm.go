@@ -894,6 +894,7 @@ func readUserInput(rl *readline.Instance) (string, error) {
 	}
 	line = strings.TrimSpace(line)
 	line = os.ExpandEnv(line)
+	line = expandHomePath(line)
 
 	// We want to separate the lowercase version for just exiting and quitting, since it'll otherwise affect product name input.
 	lineLower := strings.ToLower(line)
@@ -905,7 +906,31 @@ func readUserInput(rl *readline.Instance) (string, error) {
 	return line, nil
 }
 
+// expandHomePath expands a leading "~" to the user's home directory. If the
+// home directory can't be determined, the line is left as-is and whatever uses
+// the path will report the problem.
+func expandHomePath(line string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return line
+	}
+	return expandHomePathWith(line, home)
+}
+
+// expandHomePathWith holds the actual logic so it can be tested with any home
+// directory. "~user" forms are not expanded.
+func expandHomePathWith(line, home string) string {
+	if line == "~" {
+		return home
+	}
+	if strings.HasPrefix(line, "~/") || strings.HasPrefix(line, `~\`) {
+		return filepath.Join(home, line[2:])
+	}
+	return line
+}
+
 // List and auto-complete files and folders with tabbing.
+// Note: tab completion doesn't currently understand "~" prefixes; only the submitted line is expanded.
 func listFiles(line string) []string {
 	dir, file := filepath.Split(line)
 	if dir == "" {
