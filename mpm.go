@@ -35,6 +35,9 @@ type mpmSession struct {
 	validReleases []string
 	products      []string
 
+	supportPackages      []string
+	acceptVendorLicenses bool
+
 	installPath string
 	licensePath string
 	licenseUsed bool
@@ -108,6 +111,7 @@ func main() {
 		s.selectAndDownloadMPM,
 		s.selectRelease,
 		s.selectProducts,
+		s.selectSupportPackages,
 		s.selectInstallPath,
 		s.selectLicenseFile,
 		s.runMPM,
@@ -712,9 +716,14 @@ func (s *mpmSession) runMPM() error {
 		"install",
 		"--release=" + s.release,
 		"--destination=" + s.installPath,
-		"--products",
 	}
+	// Boolean flags must come before --products, which treats everything after it as a product name.
+	if s.acceptVendorLicenses {
+		cmdArgs = append(cmdArgs, "--accept-vendor-licenses")
+	}
+	cmdArgs = append(cmdArgs, "--products")
 	cmdArgs = append(cmdArgs, s.products...)
+	cmdArgs = append(cmdArgs, s.supportPackages...)
 
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 
