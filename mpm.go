@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -418,7 +419,7 @@ func (s *mpmSession) selectProducts() error {
 
 	for {
 		fmt.Print("Enter the products you would like to install. Use the same syntax as MPM to specify products. " +
-			"Press Enter to install all products.\n> ")
+			"Type \"list\" to see all products available for your release. Press Enter to install all products.\n> ")
 		productsInput, err := readUserInput(s.rl)
 		if err != nil {
 			if err.Error() == "Interrupt" {
@@ -431,6 +432,11 @@ func (s *mpmSession) selectProducts() error {
 		}
 
 		productsInput = strings.TrimSpace(productsInput)
+
+		if strings.EqualFold(productsInput, "list") {
+			printColumns(allProducts)
+			continue
+		}
 
 		// Determine the products we'll actually be using with MPM.
 		if productsInput == "" {
@@ -942,6 +948,37 @@ func levenshtein(a, b string) int {
 		prev, curr = curr, prev
 	}
 	return prev[lb]
+}
+
+// printColumns prints items sorted alphabetically, in two columns when the
+// names are short enough to fit side by side.
+func printColumns(items []string) {
+	sorted := make([]string, len(items))
+	copy(sorted, items)
+	sort.Strings(sorted)
+
+	longest := 0
+	for _, item := range sorted {
+		if len(item) > longest {
+			longest = len(item)
+		}
+	}
+
+	if longest > 38 {
+		for _, item := range sorted {
+			fmt.Println(item)
+		}
+		return
+	}
+
+	half := (len(sorted) + 1) / 2
+	for i := 0; i < half; i++ {
+		right := ""
+		if i+half < len(sorted) {
+			right = sorted[i+half]
+		}
+		fmt.Printf("%-*s  %s\n", longest, sorted[i], right)
+	}
 }
 
 // Reading user input in a separate function allows me to accept input such as "quit" or "exit" without needing to repeat said code.
