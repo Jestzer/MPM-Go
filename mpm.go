@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	readline "github.com/Jestzer/readlineJestzer"
 	"github.com/fatih/color"
@@ -787,8 +789,44 @@ func hasAdminRights() (bool, error) {
 	return true, nil
 }
 
+// downloadClient bounds connection setup (dial, TLS handshake, first response header).
+// Deliberately no overall request timeout, since that would cut off downloads that
+// are slow but still making progress.
+var downloadClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+	},
+}
+
+// progressWriter prints download progress as bytes pass through it.
+type progressWriter struct {
+	downloaded int64
+	total      int64 // -1 when the server doesn't report a Content-Length.
+	lastPrint  time.Time
+}
+
+func (pw *progressWriter) Write(p []byte) (int, error) {
+	pw.downloaded += int64(len(p))
+	if time.Since(pw.lastPrint) >= 250*time.Millisecond {
+		pw.print()
+		pw.lastPrint = time.Now()
+	}
+	return len(p), nil
+}
+
+func (pw *progressWriter) print() {
+	toMB := func(bytes int64) float64 { return float64(bytes) / (1024 * 1024) }
+	if pw.total > 0 {
+		fmt.Printf("\rDownloading MPM: %.1f MB / %.1f MB (%d%%)", toMB(pw.downloaded), toMB(pw.total), pw.downloaded*100/pw.total)
+	} else {
+		fmt.Printf("\rDownloading MPM: %.1f MB", toMB(pw.downloaded))
+	}
+}
+
 func downloadFile(url string, filePath string) error {
-	response, err := http.Get(url)
+	response, err := downloadClient.Get(url)
 	if err != nil {
 		return err
 	}
@@ -802,10 +840,25 @@ func downloadFile(url string, filePath string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
-	_, err = io.Copy(file, response.Body)
-	return err
+	pw := &progressWriter{total: response.ContentLength}
+	_, copyErr := io.Copy(file, io.TeeReader(response.Body, pw))
+	closeErr := file.Close()
+	if copyErr != nil || closeErr != nil {
+		if pw.downloaded > 0 {
+			fmt.Println()
+		}
+		// Don't leave a truncated binary behind to be mistaken for a working copy of MPM.
+		os.Remove(filePath)
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
+	}
+
+	pw.print() // Make sure the final byte count is what's left on screen.
+	fmt.Println()
+	return nil
 }
 
 type productSuggestion struct {
