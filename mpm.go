@@ -16,11 +16,6 @@ import (
 	"github.com/fatih/color"
 )
 
-// Used to read the output of MPM.
-type customWriter struct {
-	writer io.Writer
-}
-
 // mpmSession holds all state accumulated during the interactive CLI session.
 type mpmSession struct {
 	rl        *readline.Instance
@@ -709,9 +704,8 @@ func (s *mpmSession) runMPM() error {
 
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 
-	// Use customWriter to intercept and process MPM's output.
-	cmd.Stdout = &customWriter{writer: os.Stdout}
-	cmd.Stderr = &customWriter{writer: os.Stderr}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	err := cmd.Run() // Run it already geeeeeeeez.
 
 	if err != nil {
@@ -935,19 +929,6 @@ func listFiles(line string) []string {
 	}
 
 	return suggestions
-}
-
-// Function used to write a more meaningful installation message. Needs to be in here and not the main function.
-func (cw *customWriter) Write(p []byte) (n int, err error) {
-	output := string(p)
-	n, err = cw.writer.Write(p) // Write MPM's original message first.
-	if err != nil {
-		return n, err
-	}
-	if strings.Contains(output, "Starting install") {
-		fmt.Fprintln(cw.writer, "Installation has begun. Please wait while it finishes. There is no progress indicator.")
-	}
-	return n, nil
 }
 
 // For the double-clickers.
