@@ -121,7 +121,7 @@ func main() {
 	}
 
 	fmt.Println(s.greenText("Installation finished! Press the Enter/Return key to close this program."))
-	ExitHelper(s.rl)
+	ExitHelper(s.rl, 0)
 }
 
 // Figure out your OS.
@@ -188,7 +188,7 @@ func (s *mpmSession) detectPlatform() error {
 		s.mpmURL = "https://www.mathworks.com/mpm/glnxa64/mpm"
 	default:
 		fmt.Println(s.redText("Your operating system is unrecognized. Press Enter/Return on your keyboard to close this program."))
-		ExitHelper(s.rl)
+		ExitHelper(s.rl, 1)
 	}
 	return nil
 }
@@ -266,7 +266,7 @@ func (s *mpmSession) selectAndDownloadMPM() error {
 					if err != nil {
 						fmt.Println(s.redText("Error checking MPM's file architecture: ", err, ". Please move or delete your existing copy of MPM from the selected directory before proceeding. "+
 							"You likely either have a corrupted copy of MPM or it is for Windows or Linux. Press Enter/Return on your keyboard to close this program."))
-						ExitHelper(s.rl)
+						ExitHelper(s.rl, 1)
 					}
 					archInfo := string(output)
 
@@ -281,7 +281,7 @@ func (s *mpmSession) selectAndDownloadMPM() error {
 						}
 					} else {
 						fmt.Println(s.redText("Error checking MPM's file architecture. Please move or delete your existing copy of MPM from the selected directory before proceeding. Press Enter/Return on your keyboard to close this program."))
-						ExitHelper(s.rl)
+						ExitHelper(s.rl, 1)
 					}
 				}
 				if mpmTypeIsMismatched {
@@ -306,7 +306,7 @@ func (s *mpmSession) selectAndDownloadMPM() error {
 					if mpmTypeIsMismatched { // Make up your mind. Do you want to use ARM or Intel?
 						fmt.Println(s.redText("You can't use a version of MPM that doesn't match the CPU architecture you selected. Please either select a different directory to download " +
 							"MPM or move your existing copy elsewhere. Press Enter/Return on your keyboard to close this program."))
-						ExitHelper(s.rl)
+						ExitHelper(s.rl, 1)
 					} else {
 						fmt.Println("Skipping download.")
 						mpmDownloadNeeded = false
@@ -715,7 +715,7 @@ func (s *mpmSession) runMPM() error {
 		} else {
 			fmt.Println(s.redText("An error occurred during installation. See the error above for more information. ", err, ". Press the Enter/Return key to close this program."))
 		}
-		ExitHelper(s.rl)
+		ExitHelper(s.rl, 1)
 	}
 	return nil
 }
@@ -956,11 +956,14 @@ func listFiles(line string) []string {
 	return suggestions
 }
 
-// For the double-clickers.
-func ExitHelper(rl *readline.Instance) {
+// For the double-clickers. Waits for Enter before exiting with the given code,
+// so failures can be distinguished from successful runs by scripts.
+// Ctrl+C during the wait still exits 0 via the signal handler, matching the
+// convention that user-initiated exits are not failures.
+func ExitHelper(rl *readline.Instance, exitCode int) {
 	if rl == nil {
 		fmt.Scanln()
-		os.Exit(0)
+		os.Exit(exitCode)
 	}
 	rl.SetPrompt("")
 	_, err := rl.Readline()
@@ -968,5 +971,5 @@ func ExitHelper(rl *readline.Instance) {
 		redText := color.New(color.FgRed).SprintFunc()
 		fmt.Println(redText("Exiting from user input."))
 	}
-	os.Exit(0)
+	os.Exit(exitCode)
 }
