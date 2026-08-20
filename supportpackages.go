@@ -21,7 +21,7 @@ var mpmInputFS embed.FS
 // only install with --accept-vendor-licenses. Keywords are used instead of
 // exact names because names vary slightly between releases.
 var vendorLicenseKeywords = []string{
-	"genicam", "gige_vision", "ip_cameras", "parrot", "ryze_tello", "micro:bit",
+	"genicam", "gige_vision", "ip_cameras", "parrot", "ryze_tello", "microbit",
 }
 
 func requiresVendorLicense(pkg string) bool {
